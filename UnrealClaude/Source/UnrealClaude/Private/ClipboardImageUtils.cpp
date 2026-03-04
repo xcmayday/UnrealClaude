@@ -269,8 +269,12 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 #elif PLATFORM_MAC
 	// On macOS, use osascript to save clipboard image as PNG
 
+	// Convert to absolute path - FPaths::ProjectSavedDir() returns a relative path on macOS
+	// that UE resolves internally, but osascript needs the full POSIX path
+	FString AbsSaveDirectory = FPaths::ConvertRelativePathToFull(SaveDirectory);
+
 	// Ensure directory exists
-	IFileManager::Get().MakeDirectory(*SaveDirectory, true);
+	IFileManager::Get().MakeDirectory(*AbsSaveDirectory, true);
 
 	// Generate filename with timestamp
 	FDateTime Now = FDateTime::Now();
@@ -278,7 +282,7 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 		Now.GetYear(), Now.GetMonth(), Now.GetDay(),
 		Now.GetHour(), Now.GetMinute(), Now.GetSecond());
 
-	OutFilePath = FPaths::Combine(SaveDirectory, FileName);
+	OutFilePath = FPaths::Combine(AbsSaveDirectory, FileName);
 
 	int32 ReturnCode = -1;
 	FString StdOut, StdErr;
