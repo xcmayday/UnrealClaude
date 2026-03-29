@@ -2,10 +2,25 @@
 
 ## 配置方法
 
-编辑插件配置文件：
+### 第一步：将插件注册到项目
+
+在 `Lyra.uproject`（或你的项目 `.uproject`）的 `Plugins` 列表中添加：
+
+```json
+{
+    "Name": "UnrealClaude",
+    "Enabled": true
+}
+```
+
+> **说明：** 本插件仓库根目录下有一层 `UnrealClaude/` 子目录，实际 `.uplugin` 在第二层。UE 支持递归扫描，能正确找到，但必须在 `.uproject` 中显式注册插件名才会编译。
+
+### 第二步：创建配置文件
+
+在插件目录下创建配置文件（**此文件不会提交到 git，需手动创建**）：
 
 ```
-UnrealClaude/Config/UnrealClaude.ini
+插件目录/Config/UnrealClaude.ini
 ```
 
 内容如下：
@@ -16,6 +31,15 @@ ClaudeExecutablePath=C:\Users\你的用户名\AppData\Roaming\npm\claude-interna
 ```
 
 将路径替换为你机器上实际的 `claude-internal.cmd` 路径。
+
+**查找路径方法（Windows）：**
+```cmd
+where claude-internal.cmd
+```
+
+### 第三步：编译并重启编辑器
+
+编译项目后重启 UE 编辑器，插件会自动加载配置。
 
 ---
 
@@ -49,6 +73,7 @@ FString PrevClaudeCode = FPlatformMisc::GetEnvironmentVariable(TEXT("CLAUDECODE"
 if (!PrevClaudeCode.IsEmpty())
 {
     FPlatformMisc::SetEnvironmentVar(TEXT("CLAUDECODE"), TEXT(""));
+    UE_LOG(LogUnrealClaude, Log, TEXT("Temporarily cleared CLAUDECODE env var to allow nested claude-internal launch"));
 }
 
 ProcessHandle = FPlatformProcess::CreateProc(...);
@@ -76,16 +101,23 @@ if (!PrevClaudeCode.IsEmpty())
 
 **修复方案（已应用到 `ClaudeCodeRunner.cpp`）：**
 
-在 `GetClaudePath()` 自动扫描之前，先尝试读取 ini 配置：
+在 `GetClaudePath()` 自动扫描之前，先通过 `IPluginManager` 获取插件真实目录，再读取 ini 配置：
 
 ```cpp
-FString ConfigPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("UnrealClaude"), TEXT("Config"), TEXT("UnrealClaude.ini"));
+FString ConfigPath;
+TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealClaude"));
+if (Plugin.IsValid())
+{
+    ConfigPath = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Config"), TEXT("UnrealClaude.ini"));
+}
+
 FString ConfiguredPath;
 if (GConfig->GetString(TEXT("UnrealClaude"), TEXT("ClaudeExecutablePath"), ConfiguredPath, ConfigPath))
 {
     ConfiguredPath.TrimStartAndEndInline();
     if (!ConfiguredPath.IsEmpty() && IFileManager::Get().FileExists(*ConfiguredPath))
     {
+        UE_LOG(LogUnrealClaude, Log, TEXT("Found Claude CLI from config: %s"), *ConfiguredPath);
         CachedClaudePath = ConfiguredPath;
         return CachedClaudePath;
     }
@@ -95,14 +127,60 @@ if (GConfig->GetString(TEXT("UnrealClaude"), TEXT("ClaudeExecutablePath"), Confi
 
 ---
 
+### 问题 3：MCP bridge 找不到，日志报 "MCP bridge not found"
+
+**症状：**
+```
+LogUnrealClaude: Warning: MCP bridge not found at: .../Plugins/UnrealClaude/Resources/mcp-bridge/index.js
+```
+- 命令行中缺少 `--mcp-config` 参数
+- Claude 没有 `mcp__unrealclaude__*` 工具，无法操作编辑器
+
+**根本原因：**
+
+原版 `GetPluginDirectory()` 将插件目录硬编码为 `ProjectPluginsDir() / "UnrealClaude"`。但本仓库的结构是两层嵌套：
+
+```
+Plugins/
+  UnrealClaude/          ← 仓库根目录（无 .uplugin）
+    UnrealClaude/        ← 实际插件目录（有 .uplugin、Resources/）
+```
+
+导致路径少了一层 `UnrealClaude/`，找不到 `Resources/mcp-bridge/index.js`。
+
+**修复方案（已应用到 `ClaudeCodeRunner.cpp`）：**
+
+改用 `IPluginManager` 获取插件真实目录，不依赖硬编码路径：
+
+```cpp
+static FString GetPluginDirectory()
+{
+    TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealClaude"));
+    if (Plugin.IsValid())
+    {
+        return Plugin->GetBaseDir();
+    }
+    UE_LOG(LogUnrealClaude, Warning, TEXT("Could not find UnrealClaude plugin via IPluginManager"));
+    return FString();
+}
+```
+
+`IPluginManager` 在插件加载时已经解析了真实路径，无论插件嵌套多少层都能正确返回。
+
+---
+
 ## 修复后的验证
 
 重启 UE 编辑器后，在 Output Log 中确认以下日志：
 
 ```
 LogUnrealClaude: Found Claude CLI from config: C:\Users\...\claude-internal.cmd
-LogUnrealClaude: Temporarily cleared CLAUDECODE env var to allow nested claude-internal launch
-LogUnrealClaude: NDJSON Result: subtype=success, is_error=0, ...
+LogUnrealClaude: MCP config written to: .../Saved/UnrealClaude/mcp-config.json
+LogUnrealClaude: Async executing Claude: ...claude-internal.cmd ... --mcp-config ...
+LogUnrealClaude: NDJSON Result: subtype=success, is_error=0, duration=...ms, cost=$...
 ```
 
-出现 `subtype=success` 说明通信正常。
+关键检查点：
+- 执行的是 `claude-internal.cmd` 而非 `claude.cmd`
+- 命令行中包含 `--mcp-config` 参数
+- 出现 `subtype=success` 说明通信正常
