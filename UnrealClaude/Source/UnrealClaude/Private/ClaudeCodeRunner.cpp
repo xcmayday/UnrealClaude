@@ -11,6 +11,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Base64.h"
+#include "Interfaces/IPluginManager.h"
 #include "Async/Async.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -85,7 +86,17 @@ FString FClaudeCodeRunner::GetClaudePath()
 	bHasSearched = true;
 
 	// 1. Read from config file first (highest priority)
-	FString ConfigPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("UnrealClaude"), TEXT("Config"), TEXT("UnrealClaude.ini"));
+	FString ConfigPath;
+	TSharedPtr<IPlugin> PluginForConfig = IPluginManager::Get().FindPlugin(TEXT("UnrealClaude"));
+	if (PluginForConfig.IsValid())
+	{
+		ConfigPath = FPaths::Combine(PluginForConfig->GetBaseDir(), TEXT("Config"), TEXT("UnrealClaude.ini"));
+	}
+	else
+	{
+		// Fallback to old hardcoded path if IPluginManager fails
+		ConfigPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("UnrealClaude"), TEXT("Config"), TEXT("UnrealClaude.ini"));
+	}
 	FString ConfiguredPath;
 	if (GConfig->GetString(TEXT("UnrealClaude"), TEXT("ClaudeExecutablePath"), ConfiguredPath, ConfigPath))
 	{
@@ -311,29 +322,14 @@ bool FClaudeCodeRunner::ExecuteSync(const FClaudeRequestConfig& Config, FString&
 // Get the plugin directory path
 static FString GetPluginDirectory()
 {
-	// Try engine plugins directly (manual install location)
-	FString EnginePluginPath = FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("UnrealClaude"));
-	if (FPaths::DirectoryExists(EnginePluginPath))
+	// Use IPluginManager to get the correct path regardless of nesting depth
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealClaude"));
+	if (Plugin.IsValid())
 	{
-		return EnginePluginPath;
+		return Plugin->GetBaseDir();
 	}
 
-	// Try engine Marketplace plugins (Epic marketplace location)
-	FString MarketplacePluginPath = FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("Marketplace"), TEXT("UnrealClaude"));
-	if (FPaths::DirectoryExists(MarketplacePluginPath))
-	{
-		return MarketplacePluginPath;
-	}
-
-	// Try project plugins
-	FString ProjectPluginPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("UnrealClaude"));
-	if (FPaths::DirectoryExists(ProjectPluginPath))
-	{
-		return ProjectPluginPath;
-	}
-
-	UE_LOG(LogUnrealClaude, Warning, TEXT("Could not find UnrealClaude plugin directory. Checked: %s, %s, %s"),
-		*EnginePluginPath, *MarketplacePluginPath, *ProjectPluginPath);
+	UE_LOG(LogUnrealClaude, Warning, TEXT("Could not find UnrealClaude plugin via IPluginManager"));
 	return FString();
 }
 
