@@ -1,5 +1,6 @@
 Binaries/
 Intermediate/
 .claude-plugins/
+.codebuddy/
 CLAUDE.md
 Config/UnrealClaude.ini
