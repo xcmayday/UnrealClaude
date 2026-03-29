@@ -9,6 +9,7 @@
 #include "Misc/Paths.h"
 #include "Misc/App.h"
 #include "Misc/FileHelper.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/Base64.h"
 #include "Async/Async.h"
 #include "Serialization/JsonReader.h"
@@ -83,7 +84,25 @@ FString FClaudeCodeRunner::GetClaudePath()
 	// Allow re-search if previous search failed (CachedClaudePath is empty)
 	bHasSearched = true;
 
-	// Check common locations for claude CLI
+	// 1. Read from config file first (highest priority)
+	FString ConfigPath = FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("UnrealClaude"), TEXT("Config"), TEXT("UnrealClaude.ini"));
+	FString ConfiguredPath;
+	if (GConfig->GetString(TEXT("UnrealClaude"), TEXT("ClaudeExecutablePath"), ConfiguredPath, ConfigPath))
+	{
+		ConfiguredPath.TrimStartAndEndInline();
+		if (!ConfiguredPath.IsEmpty() && IFileManager::Get().FileExists(*ConfiguredPath))
+		{
+			UE_LOG(LogUnrealClaude, Log, TEXT("Found Claude CLI from config: %s"), *ConfiguredPath);
+			CachedClaudePath = ConfiguredPath;
+			return CachedClaudePath;
+		}
+		else if (!ConfiguredPath.IsEmpty())
+		{
+			UE_LOG(LogUnrealClaude, Warning, TEXT("Config specifies ClaudeExecutablePath=%s but file not found, falling back to auto-detect"), *ConfiguredPath);
+		}
+	}
+
+	// 2. Check common locations for claude CLI
 	TArray<FString> PossiblePaths;
 
 #if PLATFORM_WINDOWS
@@ -989,6 +1008,18 @@ bool FClaudeCodeRunner::LaunchProcess(const FString& FullCommand, const FString&
 	// FPlatformProcess::CreateProc takes the URL (executable) and Params separately
 	FString Params = FullCommand;
 
+	// Clear CLAUDECODE env var before spawning the child process.
+	// claude-internal refuses to run when it detects a parent Claude Code session
+	// (it checks for the CLAUDECODE env var and exits with "Cannot be launched inside
+	// another Claude Code session"). We temporarily unset it here and restore it after
+	// CreateProc so the UE editor's own session is unaffected.
+	FString PrevClaudeCode = FPlatformMisc::GetEnvironmentVariable(TEXT("CLAUDECODE"));
+	if (!PrevClaudeCode.IsEmpty())
+	{
+		FPlatformMisc::SetEnvironmentVar(TEXT("CLAUDECODE"), TEXT(""));
+		UE_LOG(LogUnrealClaude, Log, TEXT("Temporarily cleared CLAUDECODE env var to allow nested claude-internal launch"));
+	}
+
 	ProcessHandle = FPlatformProcess::CreateProc(
 		*ClaudePath,
 		*Params,
@@ -1004,11 +1035,22 @@ bool FClaudeCodeRunner::LaunchProcess(const FString& FullCommand, const FString&
 
 	if (!ProcessHandle.IsValid())
 	{
+		// Restore env var before returning on failure
+		if (!PrevClaudeCode.IsEmpty())
+		{
+			FPlatformMisc::SetEnvironmentVar(TEXT("CLAUDECODE"), *PrevClaudeCode);
+		}
 		UE_LOG(LogUnrealClaude, Error, TEXT("Failed to create Claude process"));
 		UE_LOG(LogUnrealClaude, Error, TEXT("Claude Path: %s"), *ClaudePath);
 		UE_LOG(LogUnrealClaude, Error, TEXT("Params: %s"), *Params);
 		UE_LOG(LogUnrealClaude, Error, TEXT("Working directory: %s"), *WorkingDir);
 		return false;
+	}
+
+	// Restore CLAUDECODE so the UE editor's own session is unaffected
+	if (!PrevClaudeCode.IsEmpty())
+	{
+		FPlatformMisc::SetEnvironmentVar(TEXT("CLAUDECODE"), *PrevClaudeCode);
 	}
 
 	return true;
